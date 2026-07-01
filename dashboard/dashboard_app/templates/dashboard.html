@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PLC workshop floor dashboard with machine map, OEE, reports, and predictive maintenance.">
+  <title>Workshop SCADA Dashboard</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">SC</div>
+        <div>
+          <p class="eyebrow">Workshop floor telemetry</p>
+          <h1>SCADA machine command center</h1>
+        </div>
+      </div>
+
+      <nav class="topology" aria-label="Network topology">
+        <span class="node">Simulator</span>
+        <span class="link"></span>
+        <span class="node">Router</span>
+        <span class="link"></span>
+        <span class="node">PLC</span>
+        <span class="link"></span>
+        <span class="node">Dashboard</span>
+      </nav>
+
+      <div class="connection">
+        <div>
+          <div class="pill"><span id="conn-dot" class="dot"></span><span id="conn-label">Connecting</span></div>
+          <div id="conn-detail" class="small mono">Waiting for PLC data</div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="dashboard">
+        <div class="panel performance-panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Plant performance</h2>
+              <p class="panel-note">OEE, live cycle flow, and the current machine state mix.</p>
+            </div>
+            <div class="small mono" id="last-update">--</div>
+          </div>
+          <div class="kpi-grid" id="kpi-grid"></div>
+        </div>
+
+        <div class="panel trend">
+          <div class="panel-head flush">
+            <div>
+              <h2 class="panel-title">Live process trace</h2>
+              <p class="panel-note">OEE, peak temperature, vibration, and maintenance risk.</p>
+            </div>
+          </div>
+          <svg id="trend-chart" viewBox="0 0 640 220" preserveAspectRatio="none" role="img" aria-label="Live trend chart"></svg>
+          <div class="trend-legend">
+            <span><i class="legend-oee"></i>OEE</span>
+            <span><i class="legend-temp"></i>Temp</span>
+            <span><i class="legend-vib"></i>Vibration</span>
+            <span><i class="legend-risk"></i>Risk</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="operations">
+        <div class="panel floor-panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Live workshop floor</h2>
+              <p class="panel-note">Machines are positioned by production line and bay with state lights.</p>
+            </div>
+            <div class="floor-toolbar" id="floor-legend"></div>
+          </div>
+          <div class="floor-map" id="floor-map"></div>
+        </div>
+
+        <aside class="panel maintenance-panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Predictive maintenance</h2>
+              <p class="panel-note">Risk blends vibration, temperature, load, alarms, and fault time.</p>
+            </div>
+          </div>
+          <div class="maintenance-list" id="maintenance-list"></div>
+        </aside>
+      </section>
+
+      <section class="analytics">
+        <div class="panel report-panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Production reports</h2>
+              <p class="panel-note">Daily, weekly, monthly, and yearly projections with machine-level detail.</p>
+            </div>
+          </div>
+          <div class="report-tabs" id="report-tabs"></div>
+          <div class="report-body" id="report-body"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Process limits</h2>
+              <p class="panel-note">Analog values are evaluated against simulator warning and alarm thresholds.</p>
+            </div>
+          </div>
+          <div class="status-table" id="process-summary"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2 class="panel-title">Alarm and event log</h2>
+              <p class="panel-note">Latest alarm transitions observed by the dashboard poller.</p>
+            </div>
+          </div>
+          <div class="event-list" id="event-list"></div>
+        </div>
+      </section>
+
+      <section class="machine-section">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Machine deep dive</p>
+            <h2>Performance cards</h2>
+          </div>
+          <div class="small mono">Source <span id="source">--</span> / block <span id="block-size">--</span></div>
+        </div>
+        <div class="machines" id="machines"></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>
