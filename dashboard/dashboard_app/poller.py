@@ -49,10 +49,6 @@ def get_current_connection_params():
 
 
 def poll():
-    last_plc_ip = None
-    last_plc_port = None
-    client = None
-
     while True:
         poll_time = time.time()
         machines = []
@@ -62,36 +58,43 @@ def poll():
         plc_ip, plc_port, device_id, machine_count, register_block_size, poll_interval = get_current_connection_params()
 
         try:
-            if client is None or plc_ip != last_plc_ip or plc_port != last_plc_port:
-                if client is not None:
+            last_error = None
+            for attempt in range(2):
+                client = ModbusTcpClient(plc_ip, port=plc_port)
+                try:
+                    if not client.connect():
+                        raise ConnectionError(f"Cannot connect to PLC at {plc_ip}:{plc_port}")
+
+                    for machine_id in range(machine_count):
+                        base_address = machine_id * register_block_size
+                        response = read_holding_registers(
+                            client,
+                            address=base_address,
+                            count=6,
+                            device_id=device_id,
+                        )
+                        if response.isError():
+                            raise RuntimeError(f"PLC read failed at register {base_address}")
+                        registers = list(response.registers[:6])
+                        if len(registers) < 6:
+                            raise RuntimeError(f"PLC returned {len(registers)} registers at {base_address}")
+                        machines.append(build_machine(machine_id, registers, poll_time, machine_total=machine_count))
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    machines = []
+                    if attempt == 0:
+                        time.sleep(0.15)
+                finally:
                     try:
                         client.close()
                     except Exception:
                         pass
-                client = ModbusTcpClient(plc_ip, port=plc_port)
-                last_plc_ip = plc_ip
-                last_plc_port = plc_port
-
-            if not is_connected(client) and not client.connect():
-                raise ConnectionError(f"Cannot connect to PLC at {plc_ip}:{plc_port}")
-
-            for machine_id in range(machine_count):
-                base_address = machine_id * register_block_size
-                response = read_holding_registers(client, address=base_address, count=6, device_id=device_id)
-                if response.isError():
-                    raise RuntimeError(f"PLC read failed at register {base_address}")
-                registers = list(response.registers[:6])
-                if len(registers) < 6:
-                    raise RuntimeError(f"PLC returned {len(registers)} registers at {base_address}")
-                machines.append(build_machine(machine_id, registers, poll_time, machine_total=machine_count))
+            if last_error is not None:
+                raise last_error
         except Exception as exc:
             error = str(exc)
-            try:
-                if client is not None:
-                    client.close()
-            except Exception:
-                pass
-            client = None  # Re-create on next loop if error occurs
 
         with state_lock:
             state["timestamp"] = now_iso()
@@ -110,4 +113,3 @@ def poll():
                 state["reports"] = build_reports(machines)
 
         time.sleep(poll_interval)
-

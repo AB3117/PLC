@@ -118,16 +118,26 @@ def merge_config(loaded: dict) -> dict:
     return config
 
 
+def merge_into(base: dict, loaded: dict) -> dict:
+    for section, values in loaded.items():
+        if isinstance(values, dict) and isinstance(base.get(section), dict):
+            base[section].update(values)
+        else:
+            base[section] = values
+    return base
+
+
 def load_config() -> dict:
+    loaded_config: dict = {}
     for path in CONFIG_PATHS:
         if not path.exists():
             continue
         try:
             with path.open("r", encoding="utf-8") as file:
-                return merge_config(json.load(file))
+                merge_into(loaded_config, json.load(file))
         except (OSError, json.JSONDecodeError):
             continue
-    return merge_config({})
+    return merge_config(loaded_config)
 
 
 CONFIG = load_config()
