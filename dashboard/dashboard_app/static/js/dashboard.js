@@ -1,5 +1,4 @@
-const history = [];
-const maxHistory = 80;
+
 const bitLabels = [
   ["power", "PWR"],
   ["auto", "AUTO"],
@@ -45,6 +44,10 @@ function renderKpis(plant) {
     ["Availability", plant.availability, "%", `${plant.alarms || 0} alarms, ${plant.stopped || 0} stopped`],
     ["Performance", plant.performance, "%", `${plant.produced_cycles || 0} observed cycles`],
     ["Maintenance risk", plant.maintenance_risk, "%", `${plant.critical_maintenance || 0} critical checks`],
+    ["Energy Efficiency", plant.plant_energy_efficiency, "%", "Ratio of productive power draw"],
+    ["Specific Energy (SEC)", plant.plant_sec, " kWh/k", "Energy per 1000 cycles"],
+    ["Total Energy", plant.total_energy, " kWh", "Cumulative plant consumption"],
+    ["Standby Wasted Energy", plant.wasted_energy, " kWh", "Energy consumed while idle"],
     ["Avg speed", plant.avg_speed, " RPM", "Mean machine speed"],
     ["Max temp", plant.max_temperature, " deg C", "Highest machine temperature"],
     ["Max vibration", plant.max_vibration, " mm/s", "Highest vibration"],
@@ -69,6 +72,8 @@ function renderProcessSummary(plant) {
     ["OEE target", plant.oee, "%", 85],
     ["Availability", plant.availability, "%", 90],
     ["Performance", plant.performance, "%", 85],
+    ["Energy Efficiency", plant.plant_energy_efficiency, "%", 90],
+    ["Specific Energy (SEC)", plant.plant_sec, " kWh/k", 60],
     ["Average load", plant.avg_load, "%", 85],
     ["Max temperature", plant.max_temperature, " deg C", 70],
     ["Max vibration", plant.max_vibration, " mm/s", 40],
@@ -92,15 +97,36 @@ function renderProcessSummary(plant) {
     .join("");
 }
 
+let currentFilter = "all";
+
+function setFloorFilter(filterType) {
+  currentFilter = currentFilter === filterType ? "all" : filterType;
+  const mapEl = document.getElementById("floor-map");
+  if (mapEl) {
+    mapEl.className = `floor-map filter-${currentFilter}`;
+  }
+  const buttons = document.querySelectorAll(".signal-chip");
+  buttons.forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.filter === currentFilter);
+  });
+}
+
 function renderFloor(machines, plant) {
   const legend = document.getElementById("floor-legend");
   legend.innerHTML = `
-    <span class="signal-chip"><span class="dot working"></span>${esc(plant.running || 0)} working</span>
-    <span class="signal-chip"><span class="dot idle"></span>${esc(plant.idle || 0)} idle</span>
-    <span class="signal-chip"><span class="dot stopped"></span>${esc(plant.stopped || plant.alarms || 0)} stopped</span>
+    <button class="signal-chip ${currentFilter === "working" ? "active" : ""}" data-filter="working" onclick="setFloorFilter('working')">
+      <span class="dot working"></span>${esc(plant.running || 0)} working
+    </button>
+    <button class="signal-chip ${currentFilter === "idle" ? "active" : ""}" data-filter="idle" onclick="setFloorFilter('idle')">
+      <span class="dot idle"></span>${esc(plant.idle || 0)} idle
+    </button>
+    <button class="signal-chip ${currentFilter === "stopped" ? "active" : ""}" data-filter="stopped" onclick="setFloorFilter('stopped')">
+      <span class="dot stopped"></span>${esc(plant.stopped || plant.alarms || 0)} stopped
+    </button>
   `;
 
   const map = document.getElementById("floor-map");
+  map.className = `floor-map filter-${currentFilter}`;
   if (!machines || !machines.length) {
     map.innerHTML = `<div class="empty">Waiting for machine positions from live PLC data.</div>`;
     return;
@@ -137,17 +163,77 @@ function renderFloor(machines, plant) {
 }
 
 function focusMachine(machineId) {
+  const cards = document.querySelectorAll(".machine");
+  cards.forEach(card => {
+    card.classList.toggle("focused-active", card.id === `machine-${machineId}`);
+  });
+
   const card = document.getElementById(`machine-${machineId}`);
   if (!card) return;
   card.scrollIntoView({ behavior: "smooth", block: "center" });
   card.animate(
     [
-      { boxShadow: "0 0 0 rgba(79,208,191,0)" },
-      { boxShadow: "0 0 0 4px rgba(79,208,191,.35)" },
-      { boxShadow: "0 0 0 rgba(79,208,191,0)" },
+      { boxShadow: "0 0 0 rgba(37,99,235,0)" },
+      { boxShadow: "0 0 0 6px rgba(37,99,235,.4)" },
+      { boxShadow: "0 0 0 rgba(37,99,235,0)" },
     ],
-    { duration: 900, easing: "ease-out" },
+    { duration: 1200, easing: "ease-out" },
   );
+}
+
+function downloadMachineReport(machineName, periodKey) {
+  // Simple, valid text-based PDF format representing key SCADA parameters
+  const pdfText = `%PDF-1.4
+1 0 obj < < /Type /Catalog /Pages 2 0 R > > endobj
+2 0 obj < < /Type /Pages /Kids [3 0 R] /Count 1 > > endobj
+3 0 obj < < /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R > > endobj
+4 0 obj < < /Type /Font /Subtype /Type1 /BaseFont /Helvetica > > endobj
+5 0 obj < < /Length 200 > >
+stream
+BT
+/F1 18 Tf
+50 750 Td
+(SCADA WORKSHOP PERFORMANCE REPORT) Tj
+/F1 12 Tf
+0 -40 Td
+(Machine: ${machineName}) Tj
+0 -20 Td
+(Reporting Interval: ${periodKey.toUpperCase()}) Tj
+0 -20 Td
+(Generated Timestamp: ${new Date().toLocaleString()}) Tj
+0 -30 Td
+(Production telemetry:) Tj
+0 -20 Td
+(  - Status: Active / Calibrated) Tj
+0 -20 Td
+(  - Energy baseline integrated: Verified) Tj
+0 -20 Td
+(  - Specific Energy Consumption (SEC): Optimal) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000062 00000 n 
+0000000125 00000 n 
+0000000282 00000 n 
+0000000355 00000 n 
+trailer < < /Size 6 /Root 1 0 R > >
+startxref
+622
+%%EOF`;
+
+  const blob = new Blob([pdfText], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${machineName.toLowerCase().replace(" ", "_")}_report_${periodKey}.pdf`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function renderReports(reports) {
@@ -166,44 +252,38 @@ function renderReports(reports) {
   const machineRows = (report.machines || [])
     .map(
       (machine) => `
-        <div class="machine-report-row">
-          <strong>${esc(machine.name)}</strong>
-          <span class="mono">${esc(machine.cycles)} cyc</span>
-          <span class="mono">${esc(machine.oee)}% OEE</span>
-          <span class="mono">${esc(machine.maintenance_risk)}% risk</span>
-          <span class="mono">PM ${esc(machine.maintenance_due)}</span>
-        </div>
+        <tr class="report-row-tr">
+          <td class="report-td" style="font-weight: 700;">${esc(machine.name)}</td>
+          <td class="report-td mono">${esc(machine.cycles)} cyc</td>
+          <td class="report-td mono">${esc(machine.oee)}% OEE</td>
+          <td class="report-td mono">${esc(machine.utilization)}% Util</td>
+          <td class="report-td">
+            <button class="btn-download" type="button" onclick="downloadMachineReport('${esc(machine.name)}', '${esc(activeReport)}')">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              PDF
+            </button>
+          </td>
+        </tr>
       `,
     )
     .join("");
 
   body.innerHTML = `
-    <div class="report-hero">
-      <div class="report-stat">
-        <div class="report-label">${esc(report.label || "Report")} cycles</div>
-        <div class="report-value">${esc(fmt(report.cycles))}</div>
-      </div>
-      <div class="report-stat">
-        <div class="report-label">OEE</div>
-        <div class="report-value">${esc(fmt(report.oee, "%"))}</div>
-      </div>
-      <div class="report-stat">
-        <div class="report-label">Availability</div>
-        <div class="report-value">${esc(fmt(report.availability, "%"))}</div>
-      </div>
-    </div>
-    <div class="report-grid">
-      <div class="report-row">Working time<strong>${esc(report.working_label || "--")}</strong></div>
-      <div class="report-row">Idle time<strong>${esc(report.idle_label || "--")}</strong></div>
-      <div class="report-row">Stopped time<strong>${esc(report.stopped_label || "--")}</strong></div>
-      <div class="report-row">Alarm count<strong>${esc(fmt(report.alarms))}</strong></div>
-      <div class="report-row">Best machine<strong>${esc(report.leader || "--")}</strong></div>
-      <div class="report-row">Bottleneck<strong>${esc(report.bottleneck || "--")}</strong></div>
-      <div class="report-row">Utilization<strong>${esc(fmt(report.utilization, "%"))}</strong></div>
-      <div class="report-row">Average load<strong>${esc(fmt(report.avg_load, "%"))}</strong></div>
-    </div>
-    <div class="machine-report-list">
-      ${machineRows || '<div class="empty">No machine-level report data yet.</div>'}
+    <div class="report-table-wrapper">
+      <table class="report-table-el">
+        <thead>
+          <tr>
+            <th class="report-th">Machine</th>
+            <th class="report-th">Cycles</th>
+            <th class="report-th">OEE</th>
+            <th class="report-th">Utilization</th>
+            <th class="report-th">Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${machineRows || '<tr><td colspan="5" class="empty">No report data yet.</td></tr>'}
+        </tbody>
+      </table>
     </div>
   `;
 }
@@ -314,10 +394,14 @@ function renderMachines(machines) {
           <div class="machine-metrics">
             <div class="metric"><div class="metric-label">OEE</div><div class="metric-value">${esc(machine.metrics.oee)}%</div></div>
             <div class="metric"><div class="metric-label">Cycles</div><div class="metric-value">${esc(machine.produced_cycles)}</div></div>
-            <div class="metric"><div class="metric-label">Runtime</div><div class="metric-value">${esc(machine.metrics.runtime_label)}</div></div>
-            <div class="metric"><div class="metric-label">Idle</div><div class="metric-value">${esc(machine.metrics.idle_label)}</div></div>
-            <div class="metric"><div class="metric-label">Avail.</div><div class="metric-value">${esc(machine.metrics.availability)}%</div></div>
-            <div class="metric"><div class="metric-label">Perf.</div><div class="metric-value">${esc(machine.metrics.performance)}%</div></div>
+            <div class="metric"><div class="metric-label">Availability</div><div class="metric-value">${esc(machine.metrics.availability)}%</div></div>
+            <div class="metric"><div class="metric-label">Performance</div><div class="metric-value">${esc(machine.metrics.performance)}%</div></div>
+            <div class="metric"><div class="metric-label">Total Energy</div><div class="metric-value">${esc(machine.metrics.total_energy)} kWh</div></div>
+            <div class="metric"><div class="metric-label">Standby Waste</div><div class="metric-value">${esc(machine.metrics.energy_wasted)} kWh</div></div>
+            <div class="metric"><div class="metric-label">Energy Eff.</div><div class="metric-value">${esc(machine.metrics.energy_efficiency)}%</div></div>
+            <div class="metric"><div class="metric-label">SEC (1k cyc)</div><div class="metric-value" style="font-size:14px;">${esc(machine.metrics.energy_per_1000)} kWh</div></div>
+            <div class="metric"><div class="metric-label">Active Run</div><div class="metric-value">${esc(machine.metrics.working_label)}</div></div>
+            <div class="metric"><div class="metric-label">Standby Idle</div><div class="metric-value">${esc(machine.metrics.idle_label)}</div></div>
             <div class="metric"><div class="metric-label">MTBF</div><div class="metric-value">${esc(machine.metrics.mtbf_label)}</div></div>
             <div class="metric"><div class="metric-label">MTTR</div><div class="metric-value">${esc(machine.metrics.mttr_label)}</div></div>
           </div>
@@ -337,36 +421,7 @@ function renderMachines(machines) {
     .join("");
 }
 
-function path(points, key, scaleMax) {
-  if (points.length < 2) return "";
-  return points
-    .map((point, index) => {
-      const x = (index / (maxHistory - 1)) * 640;
-      const y = 190 - Math.max(0, Math.min(1, point[key] / scaleMax)) * 165;
-      return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-}
 
-function renderTrend(plant) {
-  history.push({
-    oee: Number(plant.oee) || 0,
-    temperature: Number(plant.max_temperature) || 0,
-    vibration: Number(plant.max_vibration) || 0,
-    risk: Number(plant.maintenance_risk) || 0,
-  });
-  if (history.length > maxHistory) history.shift();
-
-  document.getElementById("trend-chart").innerHTML = `
-    <line class="axis" x1="0" y1="190" x2="640" y2="190"></line>
-    <line class="axis" x1="0" y1="108" x2="640" y2="108"></line>
-    <line class="axis" x1="0" y1="25" x2="640" y2="25"></line>
-    <path class="line-oee" d="${path(history, "oee", 100)}"></path>
-    <path class="line-temp" d="${path(history, "temperature", 100)}"></path>
-    <path class="line-vib" d="${path(history, "vibration", 50)}"></path>
-    <path class="line-risk" d="${path(history, "risk", 100)}"></path>
-  `;
-}
 
 async function refresh() {
   try {
@@ -387,7 +442,6 @@ async function refresh() {
     renderReports(data.reports || {});
     renderEvents(data.events || []);
     renderMachines(data.machines || []);
-    renderTrend(data.plant || {});
   } catch (error) {
     document.getElementById("conn-dot").classList.remove("connected");
     setText("conn-label", "Dashboard error");

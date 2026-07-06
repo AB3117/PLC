@@ -8,10 +8,10 @@ from .config import (
     CONFIG,
     FLOOR_ZONES,
     IDEAL_CYCLE_SECONDS,
-    MACHINE_COUNT,
     REGISTER_BLOCK_SIZE,
     REPORT_PERIODS,
     STATUS_BITS,
+    load_config,
 )
 from .state import add_event, runtime
 
@@ -61,6 +61,14 @@ def get_machine_runtime(machine_id: int) -> dict:
             "last_ts": None,
             "last_cycle_count": None,
             "observed_cycles": 0,
+            "current_cycle_duration": 0.0,
+            "last_cycle_duration": 30.0,
+            "avg_vibration": None,
+            "avg_temperature": None,
+            "avg_load": None,
+            "smoothed_risk": None,
+            "energy_consumed": 0.0,
+            "idle_energy_wasted": 0.0,
             "last_alarm": False,
             "last_estop": False,
             "first_seen": time.time(),
@@ -68,8 +76,8 @@ def get_machine_runtime(machine_id: int) -> dict:
     return runtime[machine_id]
 
 
-def floor_slot(machine_id: int) -> dict:
-    machine_total = max(1, MACHINE_COUNT)
+def floor_slot(machine_id: int, machine_total: int = 2) -> dict:
+    machine_total = max(1, machine_total)
     columns = min(5, max(2, math.ceil(math.sqrt(machine_total))))
     rows = max(1, math.ceil(machine_total / columns))
     row, column = divmod(machine_id, columns)
@@ -144,15 +152,66 @@ def maintenance_model(status: dict, analogs: dict, counters: dict) -> dict:
     vibration = analogs["vibration"]
     temperature = analogs["temperature"]
     load = analogs["load"]
-    vibration_pressure = vibration["ratio"] * 0.42
-    thermal_pressure = temperature["ratio"] * 0.26
-    load_pressure = load["ratio"] * 0.18
+
+    # Read config metadata warnings
+    vib_meta = tag_meta("vibration")
+    temp_meta = tag_meta("temperature")
+    load_meta = tag_meta("load")
+    
+    vib_warn = float(vib_meta.get("warn_high", 30))
+    temp_warn = float(temp_meta.get("warn_high", 55))
+    load_warn = float(load_meta.get("warn_high", 85))
+
+    # Sensor risk and cycle duration pressure are ONLY active when running
+    if status.get("running"):
+        # Sensor pressure based on LONG-TERM ROLLING AVERAGES, not raw instant jumps!
+        avg_vib = counters.get("avg_vibration", float(vibration["value"]))
+        avg_temp = counters.get("avg_temperature", float(temperature["value"]))
+        avg_load = counters.get("avg_load", float(load["value"]))
+
+        vib_ratio = avg_vib / vib_warn
+        temp_ratio = avg_temp / temp_warn
+        load_ratio = avg_load / load_warn
+        
+        sensor_risk = (vib_ratio * 30.0) + (temp_ratio * 25.0) + (load_ratio * 15.0)
+
+        # Cycle time pressure: detect machine lag/friction
+        cfg = load_config()
+        interval = float(cfg["simulator"].get("update_interval", 1.0))
+        usual_cycle_time = 30.0 * interval
+        effective_cycle_time = max(counters.get("last_cycle_duration", 30.0), 
+                                   counters.get("current_cycle_duration", 0.0))
+        
+        cycle_ratio = effective_cycle_time / usual_cycle_time
+        if cycle_ratio > 1.05:
+            # Slower cycle time adds up to 30% risk
+            cycle_pressure = min(30.0, (cycle_ratio - 1.0) * 50.0)
+        else:
+            cycle_pressure = 0.0
+    else:
+        # Zero stress when stopped or idle!
+        sensor_risk = 0.0
+        cycle_pressure = 0.0
+
     fault_ratio = counters["fault_time"] / counters["runtime"] * 100 if counters["runtime"] else 0
-    alarm_pressure = min(18, counters["alarm_events"] * 4)
-    risk = vibration_pressure + thermal_pressure + load_pressure + fault_ratio * 0.55 + alarm_pressure
-    if status.get("estop") or status.get("alarm"):
-        risk = max(risk, 88)
-    risk = percent(risk)
+    alarm_pressure = min(20.0, counters["alarm_events"] * 5.0)
+    
+    raw_risk = sensor_risk + cycle_pressure + (fault_ratio * 0.4) + alarm_pressure
+
+    # Force raw risk to critical ONLY on active alarms
+    if status.get("alarm"):
+        raw_risk = max(raw_risk, 85.0)
+        
+    # Long-term exponential smoothing of the final risk value itself (slow wear-and-tear trend)
+    prev_smoothed = counters.get("smoothed_risk")
+    if prev_smoothed is None:
+        prev_smoothed = raw_risk
+    
+    # 0.002 alpha means it updates very slowly over time, representing long-term trend analysis
+    smoothed_risk = (0.002 * raw_risk) + (0.998 * prev_smoothed)
+    counters["smoothed_risk"] = smoothed_risk
+    
+    risk = percent(smoothed_risk)
 
     if risk >= 80:
         state = "critical"
@@ -170,6 +229,7 @@ def maintenance_model(status: dict, analogs: dict, counters: dict) -> dict:
             ("vibration", vibration["ratio"]),
             ("temperature", temperature["ratio"]),
             ("load", load["ratio"]),
+            ("cycle_time", cycle_pressure * 3.3),  # normalize weight for driver calculation
             ("alarms", alarm_pressure * 4),
         ),
         key=lambda item: item[1],
@@ -183,12 +243,28 @@ def maintenance_model(status: dict, analogs: dict, counters: dict) -> dict:
     }
 
 
-def build_machine(machine_id: int, registers: list[int], poll_time: float) -> dict:
+def build_machine(machine_id: int, registers: list[int], poll_time: float, machine_total: int = 2) -> dict:
     status_raw, speed, temperature, vibration, load, cycle_count = registers[:6]
     status = parse_status(status_raw)
     machine_name = f"Machine {machine_id + 1}"
 
     counters = get_machine_runtime(machine_id)
+    
+    # Initialize rolling sensor averages if None
+    if counters.get("avg_vibration") is None:
+        counters["avg_vibration"] = float(vibration)
+    if counters.get("avg_temperature") is None:
+        counters["avg_temperature"] = float(temperature)
+    if counters.get("avg_load") is None:
+        counters["avg_load"] = float(load)
+
+    # Accumulate sensor averages slowly when running
+    if status["running"]:
+        alpha = 0.001
+        counters["avg_vibration"] = (alpha * vibration) + ((1.0 - alpha) * counters["avg_vibration"])
+        counters["avg_temperature"] = (alpha * temperature) + ((1.0 - alpha) * counters["avg_temperature"])
+        counters["avg_load"] = (alpha * load) + ((1.0 - alpha) * counters["avg_load"])
+
     last_ts = counters["last_ts"] or poll_time
     elapsed = max(0.0, min(5.0, poll_time - last_ts))
     counters["last_ts"] = poll_time
@@ -199,21 +275,40 @@ def build_machine(machine_id: int, registers: list[int], poll_time: float) -> di
         counters["run_time"] += elapsed
     if status["power"] and status["auto"] and not status["running"] and not status["alarm"]:
         counters["idle_time"] += elapsed
-    if status["alarm"] or status["estop"]:
+    if status["alarm"]:
         counters["fault_time"] += elapsed
+
+    # Integrate energy (load is in %, assume a 15 kW motor rating for each machine)
+    power_draw_kw = (load / 100.0) * 15.0
+    energy_increment_kwh = power_draw_kw * (elapsed / 3600.0)
+    counters["energy_consumed"] += energy_increment_kwh
+    
+    # If machine is in idle state, count it as wasted standby energy
+    is_idle = status["power"] and status["auto"] and not status["running"] and not status["alarm"]
+    if is_idle:
+        counters["idle_energy_wasted"] += energy_increment_kwh
 
     if status["alarm"] and not counters["last_alarm"]:
         counters["alarm_events"] += 1
         add_event(machine_name, "alarm", "PLC alarm bit went high")
     if status["estop"] and not counters["last_estop"]:
-        add_event(machine_name, "alarm", "Emergency stop bit is active")
+        add_event(machine_name, "info", "Machine stopped by operator")
     counters["last_alarm"] = status["alarm"]
     counters["last_estop"] = status["estop"]
 
     previous_cycle_count = counters["last_cycle_count"]
     cycle_delta = 0 if previous_cycle_count is None else max(0, cycle_count - previous_cycle_count)
     counters["last_cycle_count"] = cycle_count
-    counters["observed_cycles"] += cycle_delta
+    
+    # If machine is running, accumulate time in current cycle
+    if status["running"]:
+        counters["current_cycle_duration"] += elapsed
+        
+    if cycle_delta > 0:
+        # Cycle completed! Save its duration
+        counters["last_cycle_duration"] = counters["current_cycle_duration"] / cycle_delta
+        counters["current_cycle_duration"] = 0.0
+        counters["observed_cycles"] += cycle_delta
 
     analogs = {key: build_analog(key, value) for key, value in zip(ANALOG_KEYS, registers[1:5])}
     powered = counters["runtime"]
@@ -235,7 +330,7 @@ def build_machine(machine_id: int, registers: list[int], poll_time: float) -> di
         "name": machine_name,
         "severity": severity,
         "signal": signal,
-        "floor": floor_slot(machine_id),
+        "floor": floor_slot(machine_id, machine_total),
         "register_base": machine_id * REGISTER_BLOCK_SIZE,
         "registers": registers,
         "status": status,
@@ -263,6 +358,11 @@ def build_machine(machine_id: int, registers: list[int], poll_time: float) -> di
             "mttr_label": seconds_label(mttr),
             "alarm_events": counters["alarm_events"],
             "working_label": seconds_label(counters["run_time"]),
+            "total_energy": round(counters["energy_consumed"], 2),
+            "energy_wasted": round(counters["idle_energy_wasted"], 2),
+            "energy_wasted_cost": round(counters["idle_energy_wasted"] * 0.15, 2),
+            "energy_efficiency": percent((1.0 - (counters["idle_energy_wasted"] / counters["energy_consumed"])) * 100.0) if counters["energy_consumed"] > 0 else 100.0,
+            "energy_per_1000": round((counters["energy_consumed"] / observed_cycles * 1000.0), 2) if observed_cycles > 0 else 0.0,
         },
     }
 
@@ -270,7 +370,7 @@ def build_machine(machine_id: int, registers: list[int], poll_time: float) -> di
 def build_plant(machines: list[dict]) -> dict:
     if not machines:
         return {
-            "machine_count": MACHINE_COUNT,
+            "machine_count": 0,
             "connected_machines": 0,
             "running": 0,
             "idle": 0,
@@ -289,6 +389,10 @@ def build_plant(machines: list[dict]) -> dict:
             "avg_load": 0,
             "maintenance_risk": 0,
             "critical_maintenance": 0,
+            "total_energy": 0.0,
+            "wasted_energy": 0.0,
+            "plant_energy_efficiency": 100.0,
+            "plant_sec": 0.0,
         }
 
     totals = {
@@ -310,8 +414,13 @@ def build_plant(machines: list[dict]) -> dict:
     quality = 100.0
     oee = availability * min(performance, 100.0) * quality / 10000
 
+    total_energy_kwh = sum(m["metrics"]["total_energy"] for m in machines)
+    wasted_energy_kwh = sum(m["metrics"]["energy_wasted"] for m in machines)
+    energy_eff = percent((1.0 - (wasted_energy_kwh / total_energy_kwh)) * 100.0) if total_energy_kwh > 0 else 100.0
+    sec = round((total_energy_kwh / totals["produced_cycles"] * 1000.0), 2) if totals["produced_cycles"] > 0 else 0.0
+
     return {
-        "machine_count": MACHINE_COUNT,
+        "machine_count": len(machines),
         "connected_machines": len(machines),
         "running": sum(1 for m in machines if m["status"]["running"]),
         "idle": sum(1 for m in machines if m["severity"] == "idle"),
@@ -330,6 +439,11 @@ def build_plant(machines: list[dict]) -> dict:
         "avg_load": round(sum(m["analogs"]["load"]["value"] for m in machines) / len(machines), 1),
         "maintenance_risk": round(sum(m["maintenance"]["risk"] for m in machines) / len(machines), 1),
         "critical_maintenance": sum(1 for m in machines if m["maintenance"]["state"] == "critical"),
+        "total_energy": round(total_energy_kwh, 2),
+        "wasted_energy": round(wasted_energy_kwh, 2),
+        "wasted_energy_cost": round(wasted_energy_kwh * 0.15, 2),
+        "plant_energy_efficiency": energy_eff,
+        "plant_sec": sec,
     }
 
 
