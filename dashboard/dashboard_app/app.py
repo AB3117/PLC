@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, send_from_directory
 
 from . import state as app_state
 from .config import DASHBOARD_PORT
@@ -19,6 +20,9 @@ def create_app() -> Flask:
 
     @app.route("/")
     def home():
+        react_index = Path(app.static_folder) / "react" / "index.html"
+        if react_index.exists():
+            return send_from_directory(react_index.parent, react_index.name)
         return render_template("dashboard.html")
 
     return app

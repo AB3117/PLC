@@ -15,6 +15,8 @@ from .config import (
 )
 from .state import add_event, runtime
 
+ENERGY_TARIFF_INR = 8.6
+
 
 def percent(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 1)
@@ -360,7 +362,7 @@ def build_machine(machine_id: int, registers: list[int], poll_time: float, machi
             "working_label": seconds_label(counters["run_time"]),
             "total_energy": round(counters["energy_consumed"], 2),
             "energy_wasted": round(counters["idle_energy_wasted"], 2),
-            "energy_wasted_cost": round(counters["idle_energy_wasted"] * 0.15, 2),
+            "energy_wasted_cost": round(counters["idle_energy_wasted"] * ENERGY_TARIFF_INR, 2),
             "energy_efficiency": percent((1.0 - (counters["idle_energy_wasted"] / counters["energy_consumed"])) * 100.0) if counters["energy_consumed"] > 0 else 100.0,
             "energy_per_1000": round((counters["energy_consumed"] / observed_cycles * 1000.0), 2) if observed_cycles > 0 else 0.0,
         },
@@ -391,6 +393,7 @@ def build_plant(machines: list[dict]) -> dict:
             "critical_maintenance": 0,
             "total_energy": 0.0,
             "wasted_energy": 0.0,
+            "wasted_energy_cost": 0.0,
             "plant_energy_efficiency": 100.0,
             "plant_sec": 0.0,
         }
@@ -441,7 +444,7 @@ def build_plant(machines: list[dict]) -> dict:
         "critical_maintenance": sum(1 for m in machines if m["maintenance"]["state"] == "critical"),
         "total_energy": round(total_energy_kwh, 2),
         "wasted_energy": round(wasted_energy_kwh, 2),
-        "wasted_energy_cost": round(wasted_energy_kwh * 0.15, 2),
+        "wasted_energy_cost": round(wasted_energy_kwh * ENERGY_TARIFF_INR, 2),
         "plant_energy_efficiency": energy_eff,
         "plant_sec": sec,
     }
@@ -450,17 +453,24 @@ def build_plant(machines: list[dict]) -> dict:
 def machine_period_report(machine: dict, period_seconds: int, observed_window: float) -> dict:
     scale = period_seconds / observed_window
     metrics = machine["metrics"]
+    projected_energy = metrics["total_energy"] * scale
+    projected_waste = metrics["energy_wasted"] * scale
     return {
         "id": machine["id"],
         "name": machine["name"],
         "cycles": int(round(machine["produced_cycles"] * scale)),
         "oee": metrics["oee"],
         "availability": metrics["availability"],
+        "performance": metrics["performance"],
         "utilization": metrics["utilization"],
         "working_label": seconds_label(metrics["run_time"] * scale),
         "idle_label": seconds_label(metrics["idle_time"] * scale),
         "stopped_label": seconds_label(metrics["fault_time"] * scale),
         "alarms": int(round(metrics["alarm_events"] * scale)),
+        "energy_kwh": round(projected_energy, 2),
+        "idle_waste_kwh": round(projected_waste, 2),
+        "idle_waste_cost": round(projected_waste * ENERGY_TARIFF_INR, 2),
+        "sec": round(projected_energy / max(1, int(round(machine["produced_cycles"] * scale))) * 1000.0, 2),
         "maintenance_risk": machine["maintenance"]["risk"],
         "maintenance_due": machine["maintenance"]["due_in"],
     }
@@ -483,6 +493,11 @@ def period_report(machines: list[dict], period_key: str, label: str, period_seco
             "avg_load": 0,
             "bottleneck": "--",
             "leader": "--",
+            "energy_kwh": 0.0,
+            "idle_waste_kwh": 0.0,
+            "idle_waste_cost": 0.0,
+            "productive_energy_percent": 100.0,
+            "sec": 0.0,
             "machines": [],
         }
 
@@ -495,6 +510,11 @@ def period_report(machines: list[dict], period_key: str, label: str, period_seco
     stopped_seconds = sum(m["metrics"]["fault_time"] for m in machines)
     produced_cycles = sum(m["produced_cycles"] for m in machines)
     alarm_events = sum(m["metrics"]["alarm_events"] for m in machines)
+    total_energy = sum(m["metrics"]["total_energy"] for m in machines)
+    wasted_energy = sum(m["metrics"]["energy_wasted"] for m in machines)
+    projected_energy = total_energy * scale
+    projected_waste = wasted_energy * scale
+    projected_cycles = max(1, int(round(produced_cycles * scale)))
     availability = (
         100.0 if runtime_seconds <= 0 else (runtime_seconds - stopped_seconds) / runtime_seconds * 100
     )
@@ -522,6 +542,11 @@ def period_report(machines: list[dict], period_key: str, label: str, period_seco
         "avg_load": round(sum(m["analogs"]["load"]["value"] for m in machines) / len(machines), 1),
         "bottleneck": sorted_by_oee[0]["name"],
         "leader": sorted_by_oee[-1]["name"],
+        "energy_kwh": round(projected_energy, 2),
+        "idle_waste_kwh": round(projected_waste, 2),
+        "idle_waste_cost": round(projected_waste * ENERGY_TARIFF_INR, 2),
+        "productive_energy_percent": percent((1.0 - (projected_waste / projected_energy)) * 100.0) if projected_energy > 0 else 100.0,
+        "sec": round(projected_energy / projected_cycles * 1000.0, 2),
         "machines": [machine_period_report(m, period_seconds, observed_window) for m in machines],
     }
 
