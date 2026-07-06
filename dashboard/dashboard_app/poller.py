@@ -67,17 +67,21 @@ def poll():
 
                     for machine_id in range(machine_count):
                         base_address = machine_id * register_block_size
-                        response = read_holding_registers(
-                            client,
-                            address=base_address,
-                            count=6,
-                            device_id=device_id,
-                        )
-                        if response.isError():
-                            raise RuntimeError(f"PLC read failed at register {base_address}")
-                        registers = list(response.registers[:6])
-                        if len(registers) < 6:
-                            raise RuntimeError(f"PLC returned {len(registers)} registers at {base_address}")
+                        try:
+                            response = read_holding_registers(
+                                client,
+                                address=base_address,
+                                count=6,
+                                device_id=device_id,
+                            )
+                            if response.isError():
+                                raise RuntimeError(f"Modbus error response: {response}")
+                            registers = list(response.registers[:6])
+                            if len(registers) < 6:
+                                raise RuntimeError(f"Returned only {len(registers)} registers")
+                        except Exception as exc:
+                            print(f"[WARN] Failed to read registers for Machine {machine_id + 1} at address {base_address}: {exc}")
+                            registers = [0, 0, 0, 0, 0, 0]
                         machines.append(build_machine(machine_id, registers, poll_time, machine_total=machine_count))
                     last_error = None
                     break

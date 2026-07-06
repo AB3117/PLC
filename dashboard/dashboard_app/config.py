@@ -9,8 +9,8 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 DASHBOARD_DIR = PACKAGE_DIR.parent
 PROJECT_DIR = DASHBOARD_DIR.parent
 CONFIG_PATHS = (
-    PROJECT_DIR / "plcsim" / "config.json",
     DASHBOARD_DIR / "config.json",
+    PROJECT_DIR / "plcsim" / "config.json",
 )
 
 DEFAULT_CONFIG = {
