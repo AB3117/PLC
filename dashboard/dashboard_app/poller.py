@@ -48,57 +48,135 @@ def get_current_connection_params():
     return plc_ip, plc_port, device_id, machine_count, register_block_size, poll_interval
 
 
+def detect_machine_count(client: ModbusTcpClient, device_id: int, register_block_size: int) -> int:
+    print("[INFO] Starting automatic machine detection on PLC...")
+    count = 0
+    # Scan up to 16 machines sequentially
+    for machine_id in range(16):
+        base_address = machine_id * register_block_size
+        try:
+            response = read_holding_registers(
+                client,
+                address=base_address,
+                count=6,
+                device_id=device_id,
+            )
+            if response.isError():
+                break
+            regs = list(response.registers[:6])
+            if len(regs) < 6:
+                break
+            
+            # Check if there is active data (power, running, or speed > 0)
+            status = regs[0]
+            power = bool(status & (1 << 0))
+            running = bool(status & (1 << 2))
+            speed = regs[1]
+            
+            if not (power or running or speed > 0):
+                # No active machine data written here
+                break
+                
+            count += 1
+        except Exception:
+            break
+    print(f"[INFO] Automatically detected {count} machines on the PLC.")
+    return max(1, count)
+
+
 def poll():
+    client = None
+    last_plc_ip = None
+    last_plc_port = None
+    detected_machine_count = None
+    poll_cycles = 0
+
     while True:
         poll_time = time.time()
         machines = []
         error = None
 
         # Load parameters dynamically from config.json
-        plc_ip, plc_port, device_id, machine_count, register_block_size, poll_interval = get_current_connection_params()
+        plc_ip, plc_port, device_id, _, register_block_size, poll_interval = get_current_connection_params()
+
+        # If IP or Port changed, close existing client and reset detection
+        if client is not None and (plc_ip != last_plc_ip or plc_port != last_plc_port):
+            try:
+                client.close()
+            except Exception:
+                pass
+            client = None
+            detected_machine_count = None
 
         try:
-            last_error = None
-            for attempt in range(2):
+            # Connect if client is not initialized or not connected
+            if client is None:
                 client = ModbusTcpClient(plc_ip, port=plc_port)
-                try:
-                    if not client.connect():
-                        raise ConnectionError(f"Cannot connect to PLC at {plc_ip}:{plc_port}")
+                last_plc_ip = plc_ip
+                last_plc_port = plc_port
+                detected_machine_count = None
 
-                    for machine_id in range(machine_count):
-                        base_address = machine_id * register_block_size
-                        try:
-                            response = read_holding_registers(
-                                client,
-                                address=base_address,
-                                count=6,
-                                device_id=device_id,
-                            )
-                            if response.isError():
-                                raise RuntimeError(f"Modbus error response: {response}")
-                            registers = list(response.registers[:6])
-                            if len(registers) < 6:
-                                raise RuntimeError(f"Returned only {len(registers)} registers")
-                        except Exception as exc:
-                            print(f"[WARN] Failed to read registers for Machine {machine_id + 1} at address {base_address}: {exc}")
-                            registers = [0, 0, 0, 0, 0, 0]
-                        machines.append(build_machine(machine_id, registers, poll_time, machine_total=machine_count))
-                    last_error = None
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    machines = []
-                    if attempt == 0:
-                        time.sleep(0.15)
-                finally:
+            if not is_connected(client):
+                if not client.connect():
+                    raise ConnectionError(f"Cannot connect to PLC at {plc_ip}:{plc_port}")
+                detected_machine_count = None  # Reset detection on new connection
+
+            # Auto-detect machine count if not already done or periodically (every 30 cycles)
+            poll_cycles += 1
+            if detected_machine_count is None or poll_cycles >= 30:
+                poll_cycles = 0
+                detected_machine_count = detect_machine_count(client, device_id, register_block_size)
+
+            # Try to read all registers in a single block using the detected count
+            try:
+                total_count = (detected_machine_count - 1) * register_block_size + 6
+                response = read_holding_registers(
+                    client,
+                    address=0,
+                    count=total_count,
+                    device_id=device_id,
+                )
+                if response.isError():
+                    raise RuntimeError(f"Contiguous read error: {response}")
+                all_registers = list(response.registers[:total_count])
+                if len(all_registers) < total_count:
+                    raise RuntimeError(f"Returned only {len(all_registers)} registers, expected {total_count}")
+
+                for machine_id in range(detected_machine_count):
+                    base_idx = machine_id * register_block_size
+                    registers = all_registers[base_idx : base_idx + 6]
+                    machines.append(build_machine(machine_id, registers, poll_time, machine_total=detected_machine_count))
+            except Exception as block_exc:
+                print(f"[WARN] Contiguous block read failed: {block_exc}. Falling back to sequential machine polling.")
+                # Fallback: poll machines individually
+                for machine_id in range(detected_machine_count):
+                    base_address = machine_id * register_block_size
                     try:
-                        client.close()
-                    except Exception:
-                        pass
-            if last_error is not None:
-                raise last_error
+                        response = read_holding_registers(
+                            client,
+                            address=base_address,
+                            count=6,
+                            device_id=device_id,
+                        )
+                        if response.isError():
+                            raise RuntimeError(f"Modbus error response: {response}")
+                        registers = list(response.registers[:6])
+                        if len(registers) < 6:
+                            raise RuntimeError(f"Returned only {len(registers)} registers")
+                    except Exception as exc:
+                        print(f"[WARN] Failed to read registers for Machine {machine_id + 1} at address {base_address}: {exc}")
+                        registers = [0, 0, 0, 0, 0, 0]
+                    machines.append(build_machine(machine_id, registers, poll_time, machine_total=detected_machine_count))
+
         except Exception as exc:
             error = str(exc)
+            detected_machine_count = None  # Reset detection on connection error
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                client = None
 
         with state_lock:
             state["timestamp"] = now_iso()

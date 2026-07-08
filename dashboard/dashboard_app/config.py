@@ -9,8 +9,8 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 DASHBOARD_DIR = PACKAGE_DIR.parent
 PROJECT_DIR = DASHBOARD_DIR.parent
 CONFIG_PATHS = (
-    DASHBOARD_DIR / "config.json",
     PROJECT_DIR / "plcsim" / "config.json",
+    DASHBOARD_DIR / "config.json",
 )
 
 DEFAULT_CONFIG = {
@@ -137,7 +137,15 @@ def load_config() -> dict:
                 merge_into(loaded_config, json.load(file))
         except (OSError, json.JSONDecodeError):
             continue
-    return merge_config(loaded_config)
+    
+    merged = merge_config(loaded_config)
+    
+    # Update global CONFIG dict in-place so other modules see changes
+    if 'CONFIG' in globals() and isinstance(CONFIG, dict):
+        CONFIG.clear()
+        CONFIG.update(merged)
+        
+    return merged
 
 
 CONFIG = load_config()
